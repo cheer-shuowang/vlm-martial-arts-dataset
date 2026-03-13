@@ -1,0 +1,31 @@
+# PDF scans (too large for git)
+*.pdf
+
+# Output images (generated files)
+output/
+*/output/
+
+# macOS system files
+.DS_Store
+._.DS_Store
+**/.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Excel output (generated files)
+*.xlsx
+
+# Quarantined files
+step2_preprocess.py
+step2_batch.py
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+*.tmp
+.~*
