@@ -83,5 +83,4 @@ output/
 - Use `--no-split` for single-page PDFs.
 - The colour-bar cropping is tuned for Tiffen-style strips. Other setups
   may need threshold adjustments in `detect_right_bar()`.
-- The script does not de-skew rotated pages. Pre-process with ImageMagick
-  if needed: `convert -deskew 40% input.png output.png`
+
