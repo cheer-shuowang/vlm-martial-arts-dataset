@@ -1,7 +1,6 @@
 # VLM-Enhanced Martial Arts Dataset
 
-Digital humanities research project: structured data extraction from
-historical Chinese martial arts texts using Vision Language Models.
+
 
 ## Project Structure
 ```
@@ -9,7 +8,7 @@ scripts/
   step1/step1_metadata.py     -- Wikidata metadata acquisition
   step2/step2_preprocess.py   -- PDF scan preprocessing
 data/
-  booklist_template.csv        -- book list (14 texts)
+  booklist_template.csv        -- book list 
   known_qids.json              -- confirmed Wikidata QIDs
   pdf_mapping.json             -- bookID to PDF filename mapping
 ```
