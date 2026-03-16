@@ -14,8 +14,9 @@ Pipeline per PDF page:
   7. Save as PNG
 
 Usage:
-    python step2_preprocess.py input.pdf --book-id gy_mg -o output_dir/
-    python step2_preprocess.py input.pdf --book-id gy_mg --height 800 --dpi 300
+    python run.py input.pdf --book-id gy_mg
+    python run.py input.pdf --book-id gy_mg --force vertical --no-card-removal
+    python run.py input.pdf --book-id jx_mg --start-page 100
 
 Dependencies:
     pip install pymupdf Pillow numpy
@@ -67,16 +68,10 @@ def find_color_card_boundary(img_array: np.ndarray) -> Optional[int]:
     """
     Find the x-coordinate of the dark vertical separator between
     the book content and the color calibration card on the right edge.
-
-    Scans the middle vertical band from right to left, looking for
-    consistently dark columns in the rightmost ~35% of the image.
-
-    Returns the x-coordinate to crop at, or None if not found.
     """
     gray = np.mean(img_array, axis=2)
     h, w = gray.shape
 
-    # Use the middle 50% of height to avoid edge artifacts
     y_start = h // 4
     y_end = 3 * h // 4
     mid_band = gray[y_start:y_end, :]
@@ -94,11 +89,6 @@ def find_color_card_boundary(img_array: np.ndarray) -> Optional[int]:
 def auto_crop_content(img: Image.Image, remove_card: bool = True) -> Image.Image:
     """
     Crop out the dark background and (optionally) the color calibration card.
-
-    Steps:
-      1. If remove_card: detect and remove color card from the right
-      2. Find the bounding box of non-dark content on all sides
-      3. Add a small padding (2px) to preserve content edges
     """
     arr = np.array(img)
 
@@ -138,41 +128,30 @@ def is_double_page(img: Image.Image,
 def find_split_point(img: Image.Image) -> int:
     """
     Find the optimal x-coordinate to split a double-page spread.
-
-    Looks for the binding crease: a narrow vertical band near the center
-    with lower brightness (shadow from the spine). Falls back to the
-    geometric center if no crease is detected.
     """
     arr = np.array(img)
     gray = np.mean(arr, axis=2)
     h, w = gray.shape
 
-    # Search within the central 20% of width
     center = w // 2
     search_half = int(w * 0.1)
     x_start = center - search_half
     x_end = center + search_half
 
-    # Use the middle 60% of height to avoid margins
     y_start = int(h * 0.2)
     y_end = int(h * 0.8)
 
     region = gray[y_start:y_end, x_start:x_end]
     col_avg = np.mean(region, axis=0)
 
-    # Binding crease = darkest column in the central region
     min_col = np.argmin(col_avg)
     return x_start + min_col
 
 
 def split_double_page(img: Image.Image) -> tuple[Image.Image, Image.Image]:
     """
-    Split a double-page spread into two individual pages.
-
-    For traditional Chinese thread-bound books:
-    - RIGHT half = first (earlier) logical page
-    - LEFT half = second (later) logical page
-    Chinese books are bound on the right, read right-to-left.
+    Split a double-page spread into two individual pages (left/right).
+    RIGHT half = first logical page (Chinese reading order).
     """
     split_x = find_split_point(img)
     w, h = img.size
@@ -181,6 +160,20 @@ def split_double_page(img: Image.Image) -> tuple[Image.Image, Image.Image]:
     page_left = img.crop((0, 0, split_x, h))
 
     return page_right, page_left
+
+
+def split_vertical_page(img: Image.Image) -> tuple[Image.Image, Image.Image]:
+    """
+    Split a vertically stacked two-page scan into top and bottom halves.
+    Top half is the first logical page.
+    """
+    w, h = img.size
+    mid_y = h // 2
+
+    page_top = img.crop((0, 0, w, mid_y))
+    page_bottom = img.crop((0, mid_y, w, h))
+
+    return page_top, page_bottom
 
 
 def resize_to_height(img: Image.Image, target_height: int) -> Image.Image:
@@ -200,7 +193,8 @@ def process_pdf(pdf_path: str, book_id: str, output_dir: str,
                 dpi: int = DEFAULT_DPI,
                 target_height: int = DEFAULT_HEIGHT,
                 force_mode: Optional[str] = None,
-                remove_card: bool = True) -> dict:
+                remove_card: bool = True,
+                start_page: int = 1) -> dict:
     """
     Process a single PDF file through the full Step 2 pipeline.
 
@@ -210,8 +204,9 @@ def process_pdf(pdf_path: str, book_id: str, output_dir: str,
         output_dir:    directory for output images
         dpi:           rendering DPI (default 300)
         target_height: output image height in pixels (default 800)
-        force_mode:    "single" or "double" to override auto-detection
+        force_mode:    "single", "double", or "vertical"
         remove_card:   whether to auto-remove color calibration cards
+        start_page:    starting page number for output naming (default 1)
 
     Returns:
         dict with processing statistics
@@ -236,7 +231,7 @@ def process_pdf(pdf_path: str, book_id: str, output_dir: str,
         "errors": [],
     }
 
-    page_counter = 1
+    page_counter = start_page
 
     for pdf_idx in range(total_pdf_pages):
         pdf_page_num = pdf_idx + 1
@@ -245,25 +240,33 @@ def process_pdf(pdf_path: str, book_id: str, output_dir: str,
         try:
             # Render page to image via pymupdf
             page = doc[pdf_idx]
-            zoom = dpi / 72.0  # PDF default is 72 DPI
+            zoom = dpi / 72.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat)
             raw_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
             # Auto-crop
             cropped = auto_crop_content(raw_img, remove_card=remove_card)
             log.info("  Cropped: %dx%d -> %dx%d",
                      raw_img.size[0], raw_img.size[1],
                      cropped.size[0], cropped.size[1])
 
-            # Detect single/double
+            # Determine split mode
             if force_mode == "single":
-                double = False
+                split = "single"
             elif force_mode == "double":
-                double = True
+                split = "double"
+            elif force_mode == "vertical":
+                split = "vertical"
             else:
-                double = is_double_page(cropped)
+                split = "double" if is_double_page(cropped) else "single"
 
-            if double:
+            if split == "vertical":
+                stats["double_pages"] += 1
+                page_a, page_b = split_vertical_page(cropped)
+                pages_to_save = [page_a, page_b]
+                log.info("  Vertical split -> top/bottom")
+            elif split == "double":
                 stats["double_pages"] += 1
                 page_a, page_b = split_double_page(cropped)
                 pages_to_save = [page_a, page_b]
@@ -298,15 +301,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python step2_preprocess.py book.pdf --book-id gy_mg
-  python step2_preprocess.py book.pdf --book-id gy_mg -o ./images/gy_mg/
-  python step2_preprocess.py book.pdf --book-id gy_mg --height 800 --dpi 300
-  python step2_preprocess.py book.pdf --book-id gy_mg --force double
-  python step2_preprocess.py book.pdf --book-id gy_mg --no-card-removal
+  python run.py book.pdf --book-id gy_mg
+  python run.py book.pdf --book-id gy_mg -o ./images/gy_mg/
+  python run.py book.pdf --book-id syl_v1 --force vertical --no-card-removal
+  python run.py book.pdf --book-id jx_mg --start-page 100
+  python run.py book.pdf --book-id gy_mg --no-card-removal
 
-Notes on page ordering for Chinese thread-bound books:
-  Double-page spreads are split with the RIGHT half as the first logical
-  page, since Chinese books are bound on the right and read right-to-left.
+Split modes (--force):
+  auto       Detect automatically based on aspect ratio (default)
+  single     Treat each PDF page as one image, no splitting
+  double     Split left/right (for side-by-side double-page spreads)
+  vertical   Split top/bottom (for vertically stacked pages)
         """
     )
     parser.add_argument("pdf_file", help="Path to input PDF file")
@@ -318,10 +323,13 @@ Notes on page ordering for Chinese thread-bound books:
                         help="Rendering DPI (default: 300)")
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT,
                         help="Target height in pixels (default: 800)")
-    parser.add_argument("--force", choices=["single", "double"], default=None,
-                        help="Force all pages as single or double")
+    parser.add_argument("--force", choices=["single", "double", "vertical"],
+                        default=None,
+                        help="Force split mode: single, double, or vertical")
     parser.add_argument("--no-card-removal", action="store_true",
                         help="Disable color calibration card removal")
+    parser.add_argument("--start-page", type=int, default=1,
+                        help="Starting page number for output naming (default: 1)")
     parser.add_argument("--double-page-ratio", type=float,
                         default=DOUBLE_PAGE_RATIO_THRESHOLD,
                         help="Aspect ratio threshold for double-page detection "
@@ -350,6 +358,7 @@ Notes on page ordering for Chinese thread-bound books:
         target_height=args.height,
         force_mode=args.force,
         remove_card=not args.no_card_removal,
+        start_page=args.start_page,
     )
 
     log.info("=" * 60)
@@ -367,3 +376,4 @@ Notes on page ordering for Chinese thread-bound books:
 
 if __name__ == "__main__":
     main()
+
