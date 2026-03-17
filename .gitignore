@@ -19,8 +19,6 @@ __pycache__/
 *.xlsx
 
 # Quarantined files
-step2_preprocess.py
-step2_batch.py
 
 # IDE
 .vscode/
