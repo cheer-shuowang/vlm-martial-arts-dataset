@@ -8,7 +8,6 @@ extract detailed information about illustrations and accompanying text.
 Outputs:
   - imgID: {pageID}_1, {pageID}_2, etc.
   - original_text: source language text on the page
-  - text_to_EN: English translation
   - count_person: number of people in illustration
   - count_weapon: number of weapons
   - type_weapons: list of weapon types
@@ -31,6 +30,7 @@ import base64
 import csv
 import json
 import logging
+import re
 import os
 import sys
 import time
@@ -105,7 +105,6 @@ Each element in the array represents one illustration.
   {{
     "imgID": "{page_id}_1",
     "original_text": "The original text on this page in its source language (Classical Chinese). Transcribe the text that accompanies or describes THIS illustration. If text is shared across illustrations, include it with the first one.",
-    "text_to_EN": "English translation of original_text.",
     "count_person": 0,
     "count_weapon": 0,
     "type_weapons": [],
@@ -122,14 +121,14 @@ Each element in the array represents one illustration.
 
 Rules:
 - original_text: Transcribe the Classical Chinese text as accurately as possible. Include title/heading text if present.
-- text_to_EN: Provide a faithful English translation. Keep martial arts terminology where appropriate.
 - count_person: Count the number of distinct human figures in the illustration. 0 if the illustration shows only weapons/diagrams.
 - count_weapon: Count visible weapons (staffs, swords, spears, etc.). Hands/fists do not count as weapons.
 - type_weapons: List each weapon type in spatial order ({order_desc if count_of_image > 1 else "left to right"}). Use English terms (e.g. "staff", "sword", "spear", "halberd", "shield", "bow").
 - persons: For EACH person, describe their posture in detail and interpret the martial technique being performed.
 - If an illustration contains no people (e.g. weapon diagram only), set count_person=0 and persons=[].
 
-Respond with ONLY the JSON array. No markdown fences, no explanation."""
+Respond with ONLY the JSON array. No markdown fences, no explanation.
+IMPORTANT: Do NOT include any English translation field (text_to_EN). Only transcribe the original Chinese text."""
 
     return prompt
 
@@ -199,7 +198,7 @@ def call_vlm(image_path: str, prompt: str, api_key: str,
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 4096,  # step4 needs much longer output
+        "max_tokens": 8192,  # step4 needs much longer output
     }
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -259,24 +258,57 @@ def _parse_extraction(text: str) -> dict:
         text = text.rsplit("```", 1)[0]
     text = text.strip()
 
+    # Fix raw newlines inside JSON string values:
+    # Replace newlines that are NOT at JSON structural boundaries
+    def _fix_newlines(t):
+        in_string = False
+        escape = False
+        result = []
+        for ch in t:
+            if escape:
+                result.append(ch)
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                result.append(ch)
+                continue
+            if ch == '"':
+                in_string = not in_string
+                result.append(ch)
+                continue
+            if ch == '\n' and in_string:
+                result.append('\\n')
+                continue
+            result.append(ch)
+        return ''.join(result)
+
     try:
         result = json.loads(text)
+    except json.JSONDecodeError:
+        # Try fixing raw newlines inside strings
+        text_fixed = _fix_newlines(text)
+        try:
+            result = json.loads(text_fixed)
+        except json.JSONDecodeError as e2:
+            log.warning("  Failed to parse response: %s", text[:200])
+            return {"error": f"Parse error: {e2}", "raw_response": text}
 
-        # Ensure it's a list
-        if isinstance(result, dict):
-            result = [result]
+    # Ensure it's a list
+    if isinstance(result, dict):
+        result = [result]
 
-        if not isinstance(result, list):
-            return {"error": f"Unexpected response type: {type(result).__name__}",
-                    "raw_response": text}
+    if not isinstance(result, list):
+        return {"error": f"Unexpected response type: {type(result).__name__}",
+                "raw_response": text}
 
+    try:
         # Validate and clean each image entry
         cleaned = []
         for item in result:
             entry = {
                 "imgID": str(item.get("imgID", "")),
                 "original_text": str(item.get("original_text", "")),
-                "text_to_EN": str(item.get("text_to_EN", "")),
                 "count_person": _safe_int(item.get("count_person", 0)),
                 "count_weapon": _safe_int(item.get("count_weapon", 0)),
                 "type_weapons": item.get("type_weapons", []),
